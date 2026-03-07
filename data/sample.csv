@@ -1,0 +1,32 @@
+id,date,age,salary,city,gender,product_category,score,notes
+1,2023-01-05,25,52000,New York,Male,Electronics,78.5,good
+2,2023-01-12,30,61000,Los Angeles,Female,Clothing,85.0,excellent
+3,2023-02-03,22,,Chicago,Male,Electronics,62.3,
+4,2023-02-18,35,75000,New York,Female,Food,90.1,excellent
+5,2023-03-01,28,58000,Houston,Male,Clothing,70.0,good
+6,2023-03-14,,63000,Chicago,Female,Electronics,55.5,average
+7,2023-03-28,45,95000,New York,Male,Food,,good
+8,2023-04-10,31,67000,Los Angeles,Female,Clothing,88.2,excellent
+9,2023-04-22,29,59000,Houston,Male,Electronics,74.4,good
+10,2023-05-05,26,54000,Chicago,,Food,66.7,average
+11,2023-05-18,38,82000,New York,Female,Clothing,92.0,excellent
+12,2023-06-01,52,110000,Los Angeles,Male,Electronics,79.8,good
+13,2023-06-14,24,48000,Houston,Female,Food,61.0,average
+14,2023-06-25,33,71000,Chicago,Male,Clothing,83.5,good
+15,2023-07-08,27,56000,New York,Female,Electronics,77.1,good
+16,2023-07-21,41,89000,Los Angeles,Male,Food,86.9,excellent
+17,2023-08-03,36,78000,Houston,Female,Clothing,69.4,good
+18,2023-08-17,,,New York,Male,Electronics,72.3,average
+19,2023-09-01,23,49000,Chicago,Female,Food,58.8,average
+20,2023-09-14,39,84000,Los Angeles,Male,Clothing,94.1,excellent
+21,2023-09-14,39,84000,Los Angeles,Male,Clothing,94.1,excellent
+22,2023-10-02,44,97000,New York,Female,Electronics,80.0,good
+23,2023-10-16,32,69000,Houston,Male,Food,73.7,good
+24,2023-10-29,28,57500,Chicago,Female,Clothing,67.2,average
+25,2023-11-12,55,500000,Los Angeles,Male,Electronics,78.4,good
+26,2023-11-25,29,60000,New York,Female,Food,82.6,good
+27,2023-12-08,34,73000,Houston,Male,Clothing,90.3,excellent
+28,2023-12-21,47,102000,Chicago,Female,Electronics,85.7,excellent
+29,2024-01-04,26,53000,Los Angeles,Male,Food,64.9,average
+30,2024-01-18,31,66000,New York,Female,Clothing,76.5,good
+
