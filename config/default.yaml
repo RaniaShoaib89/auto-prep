@@ -1,0 +1,30 @@
+# AutoPrep default configuration
+# All values can be overridden when constructing AutoPrepPipeline.
+
+cleaning:
+  missing_strategy: auto          # auto | drop | mean | median | mode | ffill | bfill | constant
+  missing_threshold: 0.5          # drop columns with > 50% missing
+  outlier_method: iqr             # iqr | zscore | none
+  outlier_action: clip            # clip | remove | none
+  iqr_multiplier: 1.5
+  zscore_threshold: 3.0
+
+encoding:
+  strategy: auto                  # auto | onehot | label | frequency | ordinal
+  onehot_max_cardinality: 10      # use one-hot if n_unique <= this value
+  drop_first: true
+
+feature_engineering:
+  extract_date_features: true
+  drop_datetime_cols: true
+  drop_identifiers: true
+  identifier_unique_threshold: 0.95
+  drop_low_variance: true
+  variance_threshold: 0.01
+  drop_high_correlation: true
+  correlation_threshold: 0.95
+
+visualisation:
+  enabled: true
+  output_dir: reports/figures
+  figsize: [10, 6]
