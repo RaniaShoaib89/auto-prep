@@ -34,12 +34,30 @@ class DataProfiler:
         unique_vals = set(series.dropna().unique())
         return unique_vals.issubset({0, 1, 0.0, 1.0})
 
+    @staticmethod
+    def _is_id_like(series: pd.Series, threshold: float = 0.95) -> bool:
+        """True for columns where nearly every value is unique (row identifiers)."""
+        if len(series) <= 10:
+            return False
+        return series.nunique() / len(series) >= threshold
+
+    _DATE_FEATURE_SUFFIXES = (
+        "_year", "_month", "_day", "_dayofweek",
+        "_quarter", "_is_weekend", "_hour",
+    )
+
+    def _is_date_feature(self, col: str) -> bool:
+        """True for columns extracted from a datetime column by FeatureEngineer."""
+        return col.endswith(self._DATE_FEATURE_SUFFIXES)
+
     def _numerical_summary(self, df: pd.DataFrame) -> dict:
         num_df = df.select_dtypes(include=[np.number])
-        # Exclude binary indicator columns — they are encoded categoricals
+        # Exclude binary indicator columns, ID-like columns, and date-extracted features
         real_num_cols = [
             col for col in num_df.columns
             if not self._is_binary_indicator(num_df[col])
+            and not self._is_id_like(num_df[col])
+            and not self._is_date_feature(col)
         ]
         num_df = num_df[real_num_cols]
         if num_df.empty:
@@ -57,7 +75,8 @@ class DataProfiler:
             vc = df[col].value_counts()
             summary[col] = {
                 "n_unique": int(df[col].nunique()),
-                "top_5": vc.head(5).to_dict(),
+                # Convert keys to plain str to avoid pandas StringDtype key issues
+                "top_5": {str(k): int(v) for k, v in vc.head(5).items()},
                 "missing": int(df[col].isnull().sum()),
             }
         return summary

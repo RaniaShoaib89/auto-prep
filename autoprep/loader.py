@@ -38,18 +38,25 @@ class DataLoader:
         elif fmt == "tsv":
             return self._load_delimited(file_path, sep="\t", encoding=encoding, **kwargs)
         elif fmt == "excel":
-            return pd.read_excel(file_path, sheet_name=sheet_name, **kwargs)
+            return self._cast_object_to_string(pd.read_excel(file_path, sheet_name=sheet_name, **kwargs))
         elif fmt == "json":
-            return pd.read_json(file_path, encoding=encoding, **kwargs)
+            return self._cast_object_to_string(pd.read_json(file_path, encoding=encoding, **kwargs))
         elif fmt == "parquet":
-            return pd.read_parquet(file_path, **kwargs)
+            return self._cast_object_to_string(pd.read_parquet(file_path, **kwargs))
+
+    def _cast_object_to_string(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure string columns are StringDtype (not object) for consistent downstream handling."""
+        for col in df.select_dtypes(include=["object"]).columns:
+            df[col] = df[col].astype("string")
+        return df
 
     def _load_delimited(self, file_path: str, sep: str, encoding: str, **kwargs) -> pd.DataFrame:
         """Try primary encoding then fall back to common alternatives."""
         fallback_encodings = ["latin-1", "cp1252", "iso-8859-1"]
         for enc in [encoding] + fallback_encodings:
             try:
-                return pd.read_csv(file_path, sep=sep, encoding=enc, **kwargs)
+                df = pd.read_csv(file_path, sep=sep, encoding=enc, **kwargs)
+                return self._cast_object_to_string(df)
             except UnicodeDecodeError:
                 continue
         raise ValueError(

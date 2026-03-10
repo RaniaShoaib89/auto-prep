@@ -97,6 +97,9 @@ class AutoPrepPipeline:
         df = self.cleaner.fit_transform(df_raw)
         print(f"[AutoPrep] Cleaned    : {df.shape[0]:,} rows × {df.shape[1]} cols")
 
+        # 3b. Profile cleaned data (before encoding/engineering strips temporal + categorical)
+        cleaned_profile = self.profiler.profile(df)
+
         # 4. Visualize on raw + cleaned-pre-encoding data
         #    - raw        : original categories, distributions, missing data
         #    - pre_encode : temporal plots work because datetimes are now detected
@@ -120,6 +123,7 @@ class AutoPrepPipeline:
 
         report = {
             "raw_profile": raw_profile,
+            "cleaned_profile": cleaned_profile,
             "cleaning": self.cleaner.report,
             "encoding": self.encoder.report,
             "feature_engineering": self.engineer.report,
