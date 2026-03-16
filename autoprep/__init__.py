@@ -5,6 +5,8 @@ from autoprep.encoder import CategoricalEncoder
 from autoprep.features import FeatureEngineer
 from autoprep.profiler import DataProfiler
 from autoprep.visualizer import DataVisualizer
+from autoprep.config import load_config, parse_settings
+from autoprep.interactor import HumanPrompter
 
 __all__ = [
     "AutoPrepPipeline",
@@ -14,4 +16,7 @@ __all__ = [
     "FeatureEngineer",
     "DataProfiler",
     "DataVisualizer",
+    "load_config",
+    "parse_settings",
+    "HumanPrompter",
 ]

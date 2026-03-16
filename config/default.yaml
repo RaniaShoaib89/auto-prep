@@ -1,6 +1,20 @@
 # AutoPrep default configuration
 # All values can be overridden when constructing AutoPrepPipeline.
 
+io:
+  input_path: data/sample.csv
+  output_path: reports/processed_data.csv
+
+traffic_light:
+  missing_green_zone: [0.0, 0.10]   # auto-impute
+  missing_yellow_zone: [0.11, 0.79] # ask human
+  missing_red_zone: [0.80, 1.0]     # auto-drop
+  cardinality_limit: 50             # > limit unique text values -> ask human
+
+algorithms:
+  auto_imputation_strategy: median
+  knn_k: 5
+
 cleaning:
   missing_strategy: auto          # auto | drop | mean | median | mode | ffill | bfill | constant
   missing_threshold: 0.5          # drop columns with > 50% missing

@@ -3,7 +3,118 @@ import pandas as pd
 
 
 class DataProfiler:
-    """Generates a statistical profile of a DataFrame before and after preprocessing."""
+    """Generates statistical and diagnostics profiles of a DataFrame."""
+
+    def __init__(
+        self,
+        missing_green_zone: tuple[float, float] = (0.0, 0.10),
+        missing_yellow_zone: tuple[float, float] = (0.11, 0.79),
+        missing_red_zone: tuple[float, float] = (0.80, 1.0),
+        cardinality_limit: int = 50,
+        zscore_threshold: float = 3.0,
+        iqr_multiplier: float = 1.5,
+    ):
+        self.missing_green_zone = missing_green_zone
+        self.missing_yellow_zone = missing_yellow_zone
+        self.missing_red_zone = missing_red_zone
+        self.cardinality_limit = cardinality_limit
+        self.zscore_threshold = zscore_threshold
+        self.iqr_multiplier = iqr_multiplier
+
+    # ── diagnostics API ──────────────────────────────────────────────────────
+
+    def assess_missing_data(self, df: pd.DataFrame) -> dict:
+        """Return missingness metrics and traffic-light label for each column."""
+        n_rows = max(len(df), 1)
+        findings = {}
+
+        for col in df.columns:
+            missing_count = int(df[col].isna().sum())
+            missing_ratio = missing_count / n_rows
+            findings[col] = {
+                "missing_count": missing_count,
+                "missing_ratio": round(missing_ratio, 4),
+                "missing_pct": round(missing_ratio * 100, 2),
+                "traffic_light": self._missing_traffic_label(missing_ratio),
+            }
+
+        return findings
+
+    def assess_outliers(self, df: pd.DataFrame, method: str = "iqr") -> dict:
+        """Count outliers per numeric column using IQR or z-score bounds."""
+        findings = {}
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+        for col in numeric_cols:
+            series = df[col].dropna()
+            if len(series) < 4:
+                findings[col] = {
+                    "method": method,
+                    "outlier_count": 0,
+                    "outlier_ratio": 0.0,
+                }
+                continue
+
+            if method == "zscore":
+                std = series.std(ddof=0)
+                if std == 0 or pd.isna(std):
+                    mask = pd.Series(False, index=df.index)
+                else:
+                    zscores = ((df[col] - series.mean()) / std).abs()
+                    mask = zscores > self.zscore_threshold
+            else:
+                q1 = series.quantile(0.25)
+                q3 = series.quantile(0.75)
+                iqr = q3 - q1
+                lower = q1 - self.iqr_multiplier * iqr
+                upper = q3 + self.iqr_multiplier * iqr
+                mask = (df[col] < lower) | (df[col] > upper)
+
+            outlier_count = int(mask.fillna(False).sum())
+            findings[col] = {
+                "method": method,
+                "outlier_count": outlier_count,
+                "outlier_ratio": round(outlier_count / max(len(df), 1), 4),
+            }
+
+        return findings
+
+    def assess_cardinality(self, df: pd.DataFrame) -> dict:
+        """Flag high-cardinality string columns as potential review candidates."""
+        findings = {}
+        text_cols = df.select_dtypes(include=["object", "string", "category"]).columns
+
+        for col in text_cols:
+            n_unique = int(df[col].nunique(dropna=True))
+            findings[col] = {
+                "n_unique": n_unique,
+                "cardinality_limit": self.cardinality_limit,
+                "ask_human": n_unique > self.cardinality_limit,
+            }
+
+        return findings
+
+    def generate_health_report(self, df: pd.DataFrame) -> dict:
+        """Package diagnostics for downstream interactive decision-making."""
+        return {
+            "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
+            "missing_data": self.assess_missing_data(df),
+            "outliers": self.assess_outliers(df, method="iqr"),
+            "cardinality": self.assess_cardinality(df),
+        }
+
+    def _missing_traffic_label(self, ratio: float) -> str:
+        g_lo, g_hi = self.missing_green_zone
+        y_lo, y_hi = self.missing_yellow_zone
+        r_lo, r_hi = self.missing_red_zone
+
+        if g_lo <= ratio <= g_hi:
+            return "Green"
+        if y_lo <= ratio <= y_hi:
+            return "Yellow"
+        if r_lo <= ratio <= r_hi:
+            return "Red"
+        return "Unknown"
 
     def profile(self, df: pd.DataFrame) -> dict:
         return {

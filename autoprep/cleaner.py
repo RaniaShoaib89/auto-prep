@@ -40,6 +40,7 @@ class DataCleaner:
         df = self._drop_high_missing_columns(df)
         df = self._handle_missing(df)
         df = self._handle_outliers(df)
+        df = self._fix_nullable_int_dtype(df)
         return df
 
     # ── duplicates ──────────────────────────────────────────────────────────
@@ -57,15 +58,31 @@ class DataCleaner:
             # In pandas 3.0 string columns are StringDtype, not object dtype
             if not pd.api.types.is_string_dtype(df[col]):
                 continue
-            # Try numeric
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if converted.notna().sum() / max(len(df), 1) > 0.8:
+            
+            # Pre-clean: strip common formatting (quotes, whitespace, etc.)
+            cleaned = df[col].str.strip('"\'').str.strip()
+            
+            # Try numeric conversion on cleaned values
+            converted = pd.to_numeric(cleaned, errors="coerce")
+            numeric_count = converted.notna().sum() / max(len(df), 1)
+            
+            if numeric_count > 0.8:
+                # If pandas inferred Int64/Int32/etc but column has missing values,
+                # convert to float64 immediately: median operations on integers with
+                # missing values produce decimals (e.g., median of [10,20,30] = 20.0)
+                dtype_str = str(converted.dtype)
+                has_missing = converted.isna().any()
+                if has_missing and 'Int' in dtype_str and any(x in dtype_str for x in ['Int64', 'Int32', 'Int16', 'Int8']):
+                    converted = converted.astype('float64')
+                
                 df[col] = converted
                 continue
+            
             # Try datetime (use format='mixed' to avoid format-inference warnings)
             try:
-                converted_dt = pd.to_datetime(df[col], format="mixed", errors="coerce")
-                if converted_dt.notna().sum() / max(len(df), 1) > 0.8:
+                converted_dt = pd.to_datetime(cleaned, format="mixed", errors="coerce")
+                datetime_count = converted_dt.notna().sum() / max(len(df), 1)
+                if datetime_count > 0.8:
                     df[col] = converted_dt
             except Exception:
                 pass
@@ -168,3 +185,17 @@ class DataCleaner:
         z = np.abs(stats.zscore(series))
         clean = series[z < self.zscore_threshold]
         return clean.min(), clean.max()
+
+    def _fix_nullable_int_dtype(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Fix nullable Int64 columns that contain decimal values."""
+        for col in df.columns:
+            try:
+                dtype_str = str(df[col].dtype)
+                # Check if column has nullable integer dtype
+                if 'Int' in dtype_str and any(x in dtype_str for x in ['Int64', 'Int32', 'Int16', 'Int8']):
+                    # Try to convert to float64 (safest for mixed int/decimal data)
+                    df[col] = df[col].astype('float64')
+            except Exception:
+                # If conversion fails, skip
+                pass
+        return df
