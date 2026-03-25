@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env
+
 import json
 import pandas as pd
 import numpy as np
@@ -9,6 +12,7 @@ from autoprep.encoder import CategoricalEncoder
 from autoprep.features import FeatureEngineer
 from autoprep.profiler import DataProfiler
 from autoprep.visualizer import DataVisualizer
+from autoprep.pattern_cleaner import PatternDetector, PatternNormalizer
 from autoprep.interactor import HumanPrompter
 
 
@@ -101,7 +105,13 @@ class AutoPrepPipeline:
         # 2. Profile raw
         raw_profile = self.profiler.profile(df_raw)
 
-        # 2b. Generate diagnostics and optionally build human-in-the-loop plan
+        # 2b. Detect ambiguous patterns (numeric text, categorical variations)
+        pattern_detector = PatternDetector()
+        ambiguous_columns = pattern_detector.detect_ambiguous_columns(df_raw)
+        if ambiguous_columns:
+            print(f"[AutoPrep] Detected  {len(ambiguous_columns)} ambiguous columns requiring user input")
+
+        # 2c. Generate diagnostics and optionally build human-in-the-loop plan
         health_report = self.profiler.generate_health_report(df_raw)
         action_plan = None
 
@@ -109,19 +119,41 @@ class AutoPrepPipeline:
             prompter = self.human_prompter or HumanPrompter()
             task_split = prompter.parse_report(health_report)
 
+            # Ask about MISSING DATA (all columns, not just yellow)
             for col_name, details in task_split.get("human_tasks", {}).get("missing", {}).items():
-                prompter.prompt_missing_yellow_zone(col_name, float(details.get("missing_pct", 0.0)))
+                traffic_light = details.get("traffic_light", "Yellow")
+                prompter.prompt_missing_yellow_zone(col_name, float(details.get("missing_pct", 0.0)), traffic_light)
 
+            # Ask about CARDINALITY (all categorical columns)
             for col_name, details in task_split.get("human_tasks", {}).get("cardinality", {}).items():
                 prompter.prompt_high_cardinality(col_name, int(details.get("unique_count", 0)))
 
+            # Ask about PATTERNS (ambiguous columns)
+            for col_name, pattern_info in ambiguous_columns.items():
+                if pattern_info.get('type') == 'numeric_text':
+                    prompter.prompt_numeric_text_pattern(
+                        col_name,
+                        pattern_info.get('samples', []),
+                        pattern_info.get('match_pct', 0)
+                    )
+                elif pattern_info.get('type') == 'categorical_mixed':
+                    prompter.prompt_categorical_variations(
+                        col_name,
+                        pattern_info.get('detected_category', 'unknown'),
+                        pattern_info.get('variations', []),
+                        pattern_info.get('samples', []),
+                        pattern_info.get('match_pct', 0)
+                    )
+
             action_plan = prompter.build_action_plan()
+            
+            # Apply cleaner instructions + pattern normalization
             df_raw = self._apply_cleaner_instructions(
                 df_raw,
                 action_plan.get("cleaner_instructions", {}),
             )
 
-        # 2c. Fix Int64 dtypes BEFORE cleaning (prevent casting errors during imputation/encoding)
+        # 2d. Fix Int64 dtypes BEFORE cleaning (prevent casting errors during imputation/encoding)
         df_raw = self._fix_int64_dtypes(df_raw)
 
         # 3. Clean (type inference happens here — datetimes are detected)
@@ -142,8 +174,25 @@ class AutoPrepPipeline:
             print(f"[AutoPrep] Figures    : {len(figures)} saved to '{self.output_dir}'")
 
         # 5. Encode
+        # Re-create encoder with skip_columns from action plan
+        skip_encoding = []
+        if action_plan:
+            skip_encoding = [
+                col for col, task in action_plan.get("human_decisions", {}).get("cardinality", {}).items()
+                if task.get("action") == "skip_encoding"
+            ]
+        
+        self.encoder = CategoricalEncoder(
+            strategy=self.encoder.strategy,
+            onehot_max_cardinality=self.encoder.onehot_max_cardinality,
+            ordinal_categories=self.encoder.ordinal_categories,
+            skip_columns=skip_encoding,
+        )
+        
         df = self.encoder.fit_transform(df)
         print(f"[AutoPrep] Encoded    : {df.shape[0]:,} rows × {df.shape[1]} cols")
+        if skip_encoding:
+            print(f"[AutoPrep] Skipped    : {skip_encoding} (kept as text)")
 
         # 6. Feature engineering
         df = self.engineer.fit_transform(df)
@@ -155,6 +204,7 @@ class AutoPrepPipeline:
         report = {
             "raw_profile": raw_profile,
             "health_report": health_report,
+            "ambiguous_columns": ambiguous_columns,
             "action_plan": action_plan,
             "cleaned_profile": cleaned_profile,
             "cleaning": self.cleaner.report,
@@ -190,16 +240,19 @@ class AutoPrepPipeline:
         return df, report
 
     def _apply_cleaner_instructions(self, df: pd.DataFrame, instructions: dict) -> pd.DataFrame:
-        """Apply human/auto decisions before default cleaner rules."""
+        """Apply user decisions: drop columns, impute missing, handle cardinality, normalize patterns."""
         df = df.copy()
         
         # Fix nullable Int64 dtypes before processing
         df = self._fix_int64_dtypes(df)
 
+        # 1. Drop columns
         drop_columns = [col for col in instructions.get("drop_columns", []) if col in df.columns]
         if drop_columns:
             df = df.drop(columns=drop_columns)
+            print(f"[AutoPrep] Dropped    : {drop_columns}")
 
+        # 2. Cardinality handling (keep top 10)
         for col, action in instructions.get("cardinality_handling", {}).items():
             if col not in df.columns:
                 continue
@@ -207,6 +260,14 @@ class AutoPrepPipeline:
                 top_vals = set(df[col].dropna().value_counts().head(10).index)
                 df[col] = df[col].where(df[col].isin(top_vals), "__OTHER__")
 
+        # 3. Pattern normalization (numeric text, categorical mappings)
+        pattern_mappings = instructions.get("pattern_mappings", {})
+        if pattern_mappings:
+            normalizer = PatternNormalizer(user_mappings=pattern_mappings)
+            df = normalizer.normalize(df)
+            print(f"[AutoPrep] Normalized : {len(pattern_mappings)} pattern columns")
+
+        # 4. Missing data imputation
         missing_actions = instructions.get("missing_imputation", {})
         knn_k = int(instructions.get("knn_k", 5))
 

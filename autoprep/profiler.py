@@ -94,6 +94,87 @@ class DataProfiler:
 
         return findings
 
+    def detect_messy_categories(self, df: pd.DataFrame, min_unique: int = 3, max_unique: int = 50) -> dict:
+        """
+        Profile A: Detect columns with messy/inconsistent categorical values.
+        
+        Criteria:
+        - Data type is object/string/category
+        - Between min_unique and max_unique unique values (default 3-50)
+        
+        Returns:
+            Dictionary mapping column names to detection info.
+        """
+        findings = {}
+        text_cols = df.select_dtypes(include=["object", "string", "category"]).columns
+
+        for col in text_cols:
+            n_unique = int(df[col].nunique(dropna=True))
+            if min_unique <= n_unique <= max_unique:
+                unique_values = df[col].dropna().unique().tolist()
+                findings[col] = {
+                    "n_unique": n_unique,
+                    "profile": "A_messy_categories",
+                    "unique_values": unique_values,
+                    "eligible_for_ai": True,
+                }
+
+        return findings
+
+    def detect_messy_numbers(self, df: pd.DataFrame, digit_threshold: float = 0.80) -> dict:
+        """
+        Profile B: Detect columns with messy number-like strings.
+        
+        Criteria:
+        - Data type is object/string
+        - 80%+ (configurable) of non-null values contain digits
+        - Examples: "$100", "5 mil", "0", "1.5k"
+        
+        Args:
+            df: DataFrame to profile
+            digit_threshold: Proportion of values containing digits (default 0.80)
+        
+        Returns:
+            Dictionary mapping column names to detection info.
+        """
+        import re
+        
+        findings = {}
+        text_cols = df.select_dtypes(include=["object", "string"]).columns
+
+        for col in text_cols:
+            non_null = df[col].dropna()
+            if len(non_null) == 0:
+                continue
+            
+            # Count values containing at least one digit
+            has_digit = non_null.astype(str).apply(
+                lambda x: bool(re.search(r'\d', x))
+            ).sum()
+            
+            digit_ratio = has_digit / len(non_null)
+            
+            if digit_ratio >= digit_threshold:
+                unique_values = non_null.unique().tolist()
+                findings[col] = {
+                    "n_unique": len(unique_values),
+                    "profile": "B_messy_numbers",
+                    "digit_ratio": round(digit_ratio, 3),
+                    "unique_values": unique_values,
+                    "eligible_for_ai": True,
+                }
+
+        return findings
+
+    def detect_llm_candidates(self, df: pd.DataFrame) -> dict:
+        """
+        Combined detection: returns both Profile A and Profile B candidates for LLM mapping.
+        """
+        return {
+            "profile_a_messy_categories": self.detect_messy_categories(df),
+            "profile_b_messy_numbers": self.detect_messy_numbers(df),
+        }
+
     def generate_health_report(self, df: pd.DataFrame) -> dict:
         """Package diagnostics for downstream interactive decision-making."""
         return {

@@ -3,6 +3,9 @@ AutoPrep - Interactive Data Preprocessing Pipeline
 Modern, professional UI with human-in-the-loop capabilities
 """
 
+from dotenv import load_dotenv
+load_dotenv()  # Load GROQ_API_KEY from .env FIRST
+
 import json
 import os
 import tempfile
@@ -18,6 +21,12 @@ if "health_report_data" not in st.session_state:
     st.session_state.health_report_data = None
 if "user_decisions" not in st.session_state:
     st.session_state.user_decisions = None
+if "ambiguous_columns" not in st.session_state:
+    st.session_state.ambiguous_columns = None
+if "df_for_analysis" not in st.session_state:
+    st.session_state.df_for_analysis = None
+if "approved_mappings" not in st.session_state:
+    st.session_state.approved_mappings = {}
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -395,16 +404,106 @@ if file_path_to_use:
         
         if analyze_clicked:
             from autoprep.loader import DataLoader
+            from autoprep.pattern_cleaner import PatternDetector
             loader = DataLoader()
             df_for_health = loader.load_data(file_path_to_use)
             profiler = DataProfiler()
+            
+            # Generate health report and detect patterns
             st.session_state.health_report_data = profiler.generate_health_report(df_for_health)
+            st.session_state.df_for_analysis = df_for_health  # Save to session state
+            pattern_detector = PatternDetector()
+            st.session_state.ambiguous_columns = pattern_detector.detect_ambiguous_columns(df_for_health)
+            
             st.rerun()
         
         # Show assessment if available
         if st.session_state.health_report_data is not None:
             with st.expander("Data Quality Assessment", expanded=True):
                 render_health_report(st.session_state.health_report_data)
+            
+            # ── LLM-ASSISTED MAPPING ──────────────────────────────────────
+            # Only show if data has been analyzed
+            if st.session_state.df_for_analysis is not None:
+                st.divider()
+                st.subheader("🤖 AI-Assisted Value Mapping")
+                st.markdown("Use AI to standardize messy categories and numbers.")
+                
+                from autoprep.llm_agent import LLMAssistant
+                
+                llm = LLMAssistant()
+                profiler = DataProfiler()
+                
+                df_for_health = st.session_state.df_for_analysis
+                
+                # Detect Profile A & B candidates
+                llm_candidates = profiler.detect_llm_candidates(df_for_health)
+                
+                profile_a = llm_candidates.get("profile_a_messy_categories", {})
+                profile_b = llm_candidates.get("profile_b_messy_numbers", {})
+                
+                if not profile_a and not profile_b:
+                    st.info("✅ No messy columns detected. Your data looks clean!")
+                else:
+                    # Initialize storage for approved mappings
+                    if "approved_mappings" not in st.session_state:
+                        st.session_state.approved_mappings = {}
+                    
+                    # Profile A: Messy Categories
+                    if profile_a:
+                        st.write("**Profile A — Messy Categories (3-50 unique values)**")
+                        for col_name, info in profile_a.items():
+                            with st.expander(f"📋 {col_name} ({info['n_unique']} values)", expanded=False):
+                                if st.button(f"Generate AI mapping for {col_name}", key=f"ai_btn_a_{col_name}"):
+                                    with st.spinner(f"🔄 Generating mapping for {col_name}..."):
+                                        ai_mapping = llm.map_messy_categories(
+                                            unique_values=info['unique_values'],
+                                            column_name=col_name
+                                        )
+                                        
+                                        if llm.available:
+                                            st.success(f"✅ AI generated {len(ai_mapping)} mappings")
+                                            
+                                            # Review UI
+                                            from autoprep.streamlit_prompter import StreamlitHumanPrompter
+                                            prompter = StreamlitHumanPrompter()
+                                            approved = prompter.review_ai_mapping_categories(
+                                                col_name, ai_mapping, info['unique_values']
+                                            )
+                                            st.session_state.approved_mappings[col_name] = approved
+                                            st.success(f"✅ Saved {len(approved)} approved mappings for {col_name}")
+                                        else:
+                                            prompter = StreamlitHumanPrompter()
+                                            prompter.prompt_ai_fallback_warning()
+                                            st.info(f"Basic cleaning applied: {ai_mapping}")
+                    
+                    # Profile B: Messy Numbers
+                    if profile_b:
+                        st.write("**Profile B — Messy Numbers (80%+ contain digits)**")
+                        for col_name, info in profile_b.items():
+                            with st.expander(f"🔢 {col_name} ({info['digit_ratio']:.1%} numeric)", expanded=False):
+                                if st.button(f"Generate AI mapping for {col_name}", key=f"ai_btn_b_{col_name}"):
+                                    with st.spinner(f"🔄 Generating numeric mapping for {col_name}..."):
+                                        ai_mapping = llm.map_messy_numbers(
+                                            unique_values=info['unique_values'],
+                                            column_name=col_name
+                                        )
+                                        
+                                        if llm.available:
+                                            st.success(f"✅ AI generated {len(ai_mapping)} mappings")
+                                            
+                                            # Review UI
+                                            from autoprep.streamlit_prompter import StreamlitHumanPrompter
+                                            prompter = StreamlitHumanPrompter()
+                                            approved = prompter.review_ai_mapping_numbers(
+                                                col_name, ai_mapping, info['unique_values']
+                                            )
+                                            st.session_state.approved_mappings[col_name] = approved
+                                            st.success(f"✅ Saved {len(approved)} approved mappings for {col_name}")
+                                        else:
+                                            prompter = StreamlitHumanPrompter()
+                                            prompter.prompt_ai_fallback_warning()
+                                            st.info(f"Basic numeric extraction applied: {ai_mapping}")
             
             if not interactive_mode:
                 st.success("Assessment complete. Ready to run the pipeline.")
@@ -421,7 +520,10 @@ if interactive_mode and st.session_state.health_report_data is not None:
     st.subheader("Your Preprocessing Choices")
     st.markdown("Select how to handle columns that need attention below.")
     
-    user_decisions = collect_user_decisions_streamlit(st.session_state.health_report_data)
+    user_decisions = collect_user_decisions_streamlit(
+        st.session_state.health_report_data,
+        ambiguous_columns=st.session_state.ambiguous_columns
+    )
     st.session_state.user_decisions = user_decisions
     
     st.divider()
@@ -439,6 +541,8 @@ if run_disabled and not run_btn:
 if run_btn:
     from autoprep.pipeline import AutoPrepPipeline
     from autoprep.streamlit_prompter import StreamlitHumanPrompter
+    from autoprep.llm_agent import LLMAssistant
+    from autoprep.loader import DataLoader
     
     figures_dir = str(Path(__file__).parent / "reports" / "figures")
     
@@ -466,6 +570,23 @@ if run_btn:
 
     with st.spinner("Processing your data..."):
         try:
+            # First apply any AI-approved mappings
+            if st.session_state.approved_mappings:
+                st.info("🤖 Applying AI-approved mappings...")
+                loader = DataLoader()
+                df_to_map = loader.load_data(file_path_to_use)
+                llm = LLMAssistant()
+                
+                for col_name, mapping_dict in st.session_state.approved_mappings.items():
+                    if col_name in df_to_map.columns and mapping_dict:
+                        df_to_map = llm.apply_mapping_to_dataframe(df_to_map, col_name, mapping_dict)
+                        st.success(f"✅ Applied {len(mapping_dict)} mappings to {col_name}")
+                
+                # Save mapped DataFrame temporarily
+                temp_mapped_path = Path(tempfile.gettempdir()) / f"mapped_{Path(file_path_to_use).name}"
+                df_to_map.to_csv(temp_mapped_path, index=False)
+                file_path_to_use = str(temp_mapped_path)
+            
             df_processed, report = pipeline.run(file_path_to_use)
             rows_in = report['raw_profile']['shape']['rows']
             rows_out = report['processed_profile']['shape']['rows']

@@ -12,6 +12,7 @@ class CategoricalEncoder:
     - onehot     → low-cardinality columns (≤ onehot_max_cardinality unique values)
     - frequency  → medium / high cardinality (encode as relative frequency)
     - ordinal    → columns listed in ordinal_categories dict with a known ordering
+    - skip       → columns to keep as-is (no encoding)
     """
 
     def __init__(
@@ -22,11 +23,14 @@ class CategoricalEncoder:
         drop_first: bool = True,
         ordinal_categories: dict = None,
         # {col_name: [cat1, cat2, ...]} in ascending order
+        skip_columns: list = None,
+        # columns to NOT encode (e.g., names, titles, IDs)
     ):
         self.strategy = strategy
         self.onehot_max_cardinality = onehot_max_cardinality
         self.drop_first = drop_first
         self.ordinal_categories = ordinal_categories or {}
+        self.skip_columns = skip_columns or []
         self._encoders: dict = {}
         self.report: dict = {}
 
@@ -36,6 +40,11 @@ class CategoricalEncoder:
         encoding_log = {}
 
         for col in cat_cols:
+            # Skip columns marked to keep as-is
+            if col in self.skip_columns:
+                encoding_log[col] = {"strategy": "skip", "n_unique": df[col].nunique(), "reason": "user_requested"}
+                continue
+            
             n_unique = int(df[col].nunique(dropna=True))
             strategy = self._resolve_strategy(col, n_unique)
             encoding_log[col] = {"strategy": strategy, "n_unique": n_unique}
