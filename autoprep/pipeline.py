@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import numpy as np
 from sklearn.impute import KNNImputer
+from sklearn.preprocessing import StandardScaler
 
 from autoprep.loader import DataLoader
 from autoprep.cleaner import DataCleaner
@@ -71,6 +72,7 @@ class AutoPrepPipeline:
             strategy=encoding_strategy,
             onehot_max_cardinality=onehot_max_cardinality,
             ordinal_categories=ordinal_categories,
+            keep_high_cardinality_text=True,  # Keep names, titles, journalists readable
         )
         self.engineer = FeatureEngineer(
             extract_date_features=extract_date_features,
@@ -173,7 +175,11 @@ class AutoPrepPipeline:
             figures += viz.visualize_all(df, prefix="cleaned")
             print(f"[AutoPrep] Figures    : {len(figures)} saved to '{self.output_dir}'")
 
-        # 5. Encode
+        # 5. FEATURE ENGINEERING FIRST (extract dates BEFORE encoding)
+        df = self.engineer.fit_transform(df)
+        print(f"[AutoPrep] Engineered : {df.shape[0]:,} rows × {df.shape[1]} cols")
+
+        # 6. THEN Encode (only remaining categorical columns after date extraction)
         # Re-create encoder with skip_columns from action plan
         skip_encoding = []
         if action_plan:
@@ -187,6 +193,7 @@ class AutoPrepPipeline:
             onehot_max_cardinality=self.encoder.onehot_max_cardinality,
             ordinal_categories=self.encoder.ordinal_categories,
             skip_columns=skip_encoding,
+            keep_high_cardinality_text=True,  # Keep names, titles, journalists readable
         )
         
         df = self.encoder.fit_transform(df)
@@ -194,9 +201,9 @@ class AutoPrepPipeline:
         if skip_encoding:
             print(f"[AutoPrep] Skipped    : {skip_encoding} (kept as text)")
 
-        # 6. Feature engineering
-        df = self.engineer.fit_transform(df)
-        print(f"[AutoPrep] Engineered : {df.shape[0]:,} rows × {df.shape[1]} cols")
+        # 7. Normalize numeric columns (for correlation, ML models)
+        df, normalization_report = self._normalize_numeric_columns(df)
+        print(f"[AutoPrep] Normalized : numeric columns standardized for ML")
 
         # 7. Profile processed
         processed_profile = self.profiler.profile(df)
@@ -210,6 +217,7 @@ class AutoPrepPipeline:
             "cleaning": self.cleaner.report,
             "encoding": self.encoder.report,
             "feature_engineering": self.engineer.report,
+            "normalization": normalization_report,
             "processed_profile": processed_profile,
             "figures": figures,
         }
@@ -312,3 +320,44 @@ class AutoPrepPipeline:
             except Exception:
                 pass
         return df
+
+    def _normalize_numeric_columns(self, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+        """
+        Normalize (standardize) ONLY continuous numeric columns for ML correlation analysis.
+        Skip binary (0/1) encoded columns - they should stay as 0/1.
+        Text columns stay readable (not normalized).
+        
+        Returns:
+            (df_normalized, report_dict)
+        """
+        df = df.copy()
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        # Filter out binary columns (0/1 one-hot encoded) - don't normalize these
+        continuous_cols = []
+        binary_cols = []
+        
+        for col in numeric_cols:
+            unique_vals = df[col].unique()
+            # Check if column is binary (only 0, 1, NaN)
+            non_null_vals = unique_vals[~pd.isna(unique_vals)]
+            if len(non_null_vals) <= 2 and all(v in [0.0, 1.0] for v in non_null_vals):
+                binary_cols.append(col)
+            else:
+                continuous_cols.append(col)
+        
+        report = {
+            "columns_normalized": continuous_cols,
+            "binary_columns_kept_as_is": binary_cols,
+            "scaler": "StandardScaler"
+        }
+        
+        # Only normalize continuous numeric columns
+        if continuous_cols:
+            scaler = StandardScaler()
+            df[continuous_cols] = scaler.fit_transform(df[continuous_cols])
+            # Store means/stds for reporting
+            report["means"] = dict(zip(continuous_cols, scaler.mean_.round(4)))
+            report["std_devs"] = dict(zip(continuous_cols, scaler.scale_.round(4)))
+        
+        return df, report

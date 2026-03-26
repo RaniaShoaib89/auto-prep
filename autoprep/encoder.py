@@ -25,12 +25,15 @@ class CategoricalEncoder:
         # {col_name: [cat1, cat2, ...]} in ascending order
         skip_columns: list = None,
         # columns to NOT encode (e.g., names, titles, IDs)
+        keep_high_cardinality_text: bool = True,
+        # Keep high-cardinality text columns readable (names, titles, journalists)
     ):
         self.strategy = strategy
         self.onehot_max_cardinality = onehot_max_cardinality
         self.drop_first = drop_first
         self.ordinal_categories = ordinal_categories or {}
         self.skip_columns = skip_columns or []
+        self.keep_high_cardinality_text = keep_high_cardinality_text
         self._encoders: dict = {}
         self.report: dict = {}
 
@@ -45,7 +48,18 @@ class CategoricalEncoder:
                 encoding_log[col] = {"strategy": "skip", "n_unique": df[col].nunique(), "reason": "user_requested"}
                 continue
             
+            # Skip date-related columns (should be numeric but just in case)
+            if any(x in col.lower() for x in ["_year", "_month", "_day", "_hour", "_quarter", "_dayofweek", "_weekend"]):
+                encoding_log[col] = {"strategy": "skip", "n_unique": df[col].nunique(), "reason": "date_feature"}
+                continue
+            
             n_unique = int(df[col].nunique(dropna=True))
+            
+            # Keep high-cardinality text columns readable (names, titles, journalists, etc)
+            if self.keep_high_cardinality_text and n_unique > self.onehot_max_cardinality:
+                encoding_log[col] = {"strategy": "skip", "n_unique": n_unique, "reason": "high_cardinality_text_kept_readable"}
+                continue
+            
             strategy = self._resolve_strategy(col, n_unique)
             encoding_log[col] = {"strategy": strategy, "n_unique": n_unique}
 

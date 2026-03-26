@@ -15,6 +15,9 @@ import pandas as pd
 import streamlit as st
 from autoprep.config import parse_settings
 from autoprep.profiler import DataProfiler
+from autoprep.llm_agent import LLMAssistant
+from autoprep.loader import DataLoader
+from autoprep.pipeline import AutoPrepPipeline
 
 # ── Initialize session state ──────────────────────────────────────────────────
 if "health_report_data" not in st.session_state:
@@ -27,6 +30,10 @@ if "df_for_analysis" not in st.session_state:
     st.session_state.df_for_analysis = None
 if "approved_mappings" not in st.session_state:
     st.session_state.approved_mappings = {}
+if "quality_report" not in st.session_state:
+    st.session_state.quality_report = None
+if "auto_mappings" not in st.session_state:
+    st.session_state.auto_mappings = {}
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -261,86 +268,46 @@ def render_action_plan(action_plan: dict):
 # ── SIDEBAR: Pipeline Configuration ───────────────────────────────────────────
 with st.sidebar:
     st.title("Pipeline Configuration")
-    st.caption("Customize preprocessing behavior below")
+    st.caption("Essential settings only - most preprocessing is automated")
 
     st.divider()
     
-    # Interactive mode
-    st.subheader("Mode")
-    interactive_mode = st.checkbox("Enable Interactive Mode", value=False, help="Make decisions for columns that need attention")
+    st.subheader("⚙️ Core Settings")
     
-    # KNN settings
-    try:
-        settings = parse_settings()
-        default_knn = settings.algorithms.knn_k
-    except Exception:
-        default_knn = 5
-    
-    knn_k = st.slider("KNN Neighbors", min_value=2, max_value=15, value=default_knn, help="For intelligent missing value imputation")
-
-    st.divider()
-    
-    # Data cleaning options
-    st.subheader("Data Cleaning")
+    # ONLY ESSENTIAL SETTINGS
     missing_strategy = st.selectbox(
-        "Missing Value Strategy",
-        ["auto", "mean", "median", "mode", "ffill", "bfill", "drop", "constant"],
+        "Missing Values",
+        ["auto", "drop", "median", "mode"],
         index=0,
-        help="Method for filling missing values",
+        help="How to handle missing values if necessary",
     )
-    missing_threshold = st.slider(
-        "Drop Column Threshold (%)",
-        min_value=0, max_value=100, value=50, step=5,
-        help="Drop columns with >X% missing",
-    )
-    outlier_method = st.selectbox(
-        "Outlier Detection",
-        ["iqr", "zscore", "none"],
-        index=0,
-        help="Statistical method for detecting outliers",
-    )
+    
     outlier_action = st.selectbox(
-        "Outlier Handling",
-        ["none", "clip", "remove"],
+        "Outliers",
+        ["keep", "remove", "clip"],
         index=0,
-        help="Action to take on detected outliers",
+        help="Action on statistical outliers",
     )
-
+    
     st.divider()
     
-    # Encoding options
-    st.subheader("Categorical Encoding")
-    encoding_strategy = st.selectbox(
-        "Encoding Strategy",
-        ["auto", "onehot", "label", "frequency"],
-        index=0,
-        help="Strategy for converting categories to numbers",
-    )
-    onehot_max_cardinality = st.slider(
-        "One-Hot Max Cardinality",
-        min_value=2, max_value=50, value=10,
-        help="Use one-hot for categories with ≤X unique values",
-    )
-
+    st.subheader("🔒 Optional Scans")
+    detect_pii = st.checkbox("Scan for sensitive data (PII)", value=False, help="Enable only if needed")
+    
     st.divider()
     
-    # Feature engineering
-    st.subheader("Feature Engineering")
-    extract_date_features = st.checkbox("Extract Date Features", value=True, help="Create year/month/day columns")
-    drop_identifiers = st.checkbox("Drop ID Columns", value=True, help="Remove identifier-like columns")
-    drop_low_variance = st.checkbox("Drop Low-Variance", value=True, help="Remove nearly-constant columns")
-    drop_high_correlation = st.checkbox("Drop Redundant", value=True, help="Remove highly correlated columns")
+    st.info("✅ Automated: AI mapping, date extraction, low-variance dropping, one-hot encoding (auto-detect cardinality)")
 
-    st.divider()
-    
-    # Output options
-    st.subheader("Output")
-    visualize = st.checkbox("Generate Visualizations", value=True, help="Create analysis plots")
+    # Set defaults for automated features
+    drop_low_variance = True
+    extract_date_features = True
+    encoding_strategy = "auto"
+    onehot_max_cardinality = 10
 
 
 # ── MAIN AREA: Data Input and Pipeline ────────────────────────────────────────
-st.title("Data Preprocessing Pipeline")
-st.markdown("Load your dataset, configure options in the sidebar, and run the pipeline.")
+st.title("AutoPrep - Data Preprocessing")
+st.markdown("Upload data → Auto-analyze → Review AI mappings → Run pipeline")
 
 st.divider()
 
@@ -403,17 +370,67 @@ if file_path_to_use:
             analyze_clicked = st.button("Analyze Data", type="primary", use_container_width=True)
         
         if analyze_clicked:
-            from autoprep.loader import DataLoader
             from autoprep.pattern_cleaner import PatternDetector
+            
             loader = DataLoader()
-            df_for_health = loader.load_data(file_path_to_use)
+            df_raw = loader.load_data(file_path_to_use)
             profiler = DataProfiler()
             
-            # Generate health report and detect patterns
-            st.session_state.health_report_data = profiler.generate_health_report(df_for_health)
-            st.session_state.df_for_analysis = df_for_health  # Save to session state
-            pattern_detector = PatternDetector()
-            st.session_state.ambiguous_columns = pattern_detector.detect_ambiguous_columns(df_for_health)
+            # STEP 1: Auto-generate ALL MAPPINGS first (no user clicks needed)
+            print("[Step 1] Detecting columns that need mapping...")
+            llm_candidates = profiler.detect_llm_candidates(df_raw)
+            
+            all_mappings = {}  # Store all auto-generated mappings
+            llm_agent = LLMAssistant()
+            
+            # Profile A: Messy categories
+            for col_name in llm_candidates.get("profile_a_messy_categories", []):
+                unique_vals = df_raw[col_name].unique().tolist()
+                print(f"📡 Auto-generating mapping for {col_name}...")
+                mapping = llm_agent.map_messy_categories(
+                    [v for v in unique_vals if pd.notna(v)],
+                    col_name
+                )
+                all_mappings[col_name] = {"type": "category", "mapping": mapping, "unique_values": unique_vals}
+            
+            # Profile B: Messy numbers
+            for col_name in llm_candidates.get("profile_b_messy_numbers", []):
+                unique_vals = df_raw[col_name].unique().tolist()
+                print(f"📡 Auto-generating mapping for {col_name}...")
+                mapping = llm_agent.map_messy_numbers(
+                    [v for v in unique_vals if pd.notna(v)],
+                    col_name
+                )
+                all_mappings[col_name] = {"type": "numeric", "mapping": mapping, "unique_values": unique_vals}
+            
+            st.session_state.auto_mappings = all_mappings
+            print(f"[Step 1] Generated {len(all_mappings)} mappings")
+            
+            # STEP 2: Apply mappings to actual data
+            print("[Step 2] Applying mappings to data...")
+            df_mapped = df_raw.copy()
+            for col_name, mapping_config in all_mappings.items():
+                mapping = mapping_config["mapping"]
+                if mapping:
+                    df_mapped[col_name] = llm_agent.apply_mapping_to_dataframe(df_mapped, col_name, mapping)[col_name]
+                    print(f"  ✅ Applied mapping to {col_name}")
+            
+            st.session_state.df_for_analysis = df_mapped  # Save MAPPED data
+            st.session_state.df_raw = df_raw  # Save raw for comparison
+            print("[Step 2] Mappings applied")
+            
+            # STEP 3: Analyze MAPPED data (not raw data)
+            print("[Step 3] Analyzing cleaned/mapped data...")
+            st.session_state.health_report_data = profiler.generate_health_report(df_mapped)
+            
+            # Only generate quality report if needed
+            if detect_pii:
+                st.session_state.quality_report = llm_agent.generate_data_quality_report(df_mapped)
+            else:
+                # Generate quality report without PII detection
+                quality_report = llm_agent.generate_data_quality_report(df_mapped)
+                quality_report["pii_data"] = {}  # Clear PII data if not requested
+                st.session_state.quality_report = quality_report
             
             st.rerun()
         
@@ -422,248 +439,242 @@ if file_path_to_use:
             with st.expander("Data Quality Assessment", expanded=True):
                 render_health_report(st.session_state.health_report_data)
             
+            # Show comprehensive quality report if available
+            if st.session_state.quality_report is not None:
+                st.divider()
+                st.subheader("📊 Data Quality Assessment")
+                
+                qr = st.session_state.quality_report
+                
+                # QUICK SUMMARY (always visible)
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Missing Data %", f"{qr['missing_values']['overall_missing_pct']:.1f}%")
+                with col2:
+                    st.metric("Duplicates %", f"{qr['duplicates']['exact_duplicates'].get('pct', 0):.1f}%")
+                with col3:
+                    st.metric("Data Quality Issues", len(qr["action_items"]))
+                with col4:
+                    st.metric("PII Columns", len(qr["pii_data"]))
+                
+                # ACTION ITEMS (critical)
+                if qr["action_items"]:
+                    with st.container(border=True):
+                        st.write("**⚠️ ACTION ITEMS - Review these:**")
+                        for item in qr["action_items"]:
+                            st.write(f"• {item['message']}")
+                
+                # Detailed tabs (collapsed by default)
+                with st.expander("📖 Detailed Analysis (click to expand)", expanded=False):
+                    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+                        ["Missing", "Types", "Outliers", "Duplicates", "PII", "Stats", "Validation"]
+                    )
+                    
+                    with tab1:
+                        if qr["missing_values"]["columns_with_missing"]:
+                            st.dataframe(
+                                pd.DataFrame(qr["missing_values"]["columns_with_missing"]).T,
+                                use_container_width=True
+                            )
+                        else:
+                            st.success("No missing values")
+                    
+                    with tab2:
+                        st.dataframe(pd.DataFrame(qr["data_types"]).T, use_container_width=True)
+                    
+                    with tab3:
+                        if qr["outliers"]["numeric_columns"]:
+                            st.dataframe(
+                                pd.DataFrame(qr["outliers"]["numeric_columns"]).T,
+                                use_container_width=True
+                            )
+                        else:
+                            st.success("No outliers detected")
+                    
+                    with tab4:
+                        st.write(f"Exact duplicates: {qr['duplicates']['exact_duplicates']['count']}")
+                        if qr["duplicates"]["exact_duplicates"]["found"]:
+                            st.warning(qr['duplicates']['suggestion'])
+                    
+                    with tab5:
+                        if qr["pii_data"]:
+                            st.error("🔴 PII DETECTED:")
+                            for col, pii_list in qr["pii_data"].items():
+                                st.write(f"**{col}:** {[p['type'] for p in pii_list]}")
+                        else:
+                            st.success("✅ No PII detected")
+                    
+                    with tab6:
+                        stats_data = qr["statistics"]
+                        if stats_data["numeric_summary"]:
+                            st.dataframe(pd.DataFrame(stats_data["numeric_summary"]).T, use_container_width=True)
+                            if stats_data["high_correlations"]:
+                                st.write("**High Correlations:**")
+                                st.dataframe(pd.DataFrame(stats_data["high_correlations"]), use_container_width=True)
+                        else:
+                            st.info("No numeric data")
+                    
+                    with tab7:
+                        domain_data = qr["domain_validation"]
+                        if domain_data["violations"]:
+                            st.warning(f"{len(domain_data['violations'])} validation issues")
+                            for col, violations in domain_data["validations"].items():
+                                with st.expander(f"**{col}**"):
+                                    for v in violations:
+                                        st.write(f"- {v['rule']}: {v.get('invalid_pct', v.get('future_pct', 0)):.1f}% violations")
+                        else:
+                            st.success("✅ All domain rules valid")
+            
             # ── LLM-ASSISTED MAPPING ──────────────────────────────────────
             # Only show if data has been analyzed
             if st.session_state.df_for_analysis is not None:
                 st.divider()
                 st.subheader("🤖 AI-Assisted Value Mapping")
                 st.markdown("Use AI to standardize messy categories and numbers.")
-                
-                from autoprep.llm_agent import LLMAssistant
-                
-                llm = LLMAssistant()
-                profiler = DataProfiler()
-                
-                df_for_health = st.session_state.df_for_analysis
-                
-                # Detect Profile A & B candidates
-                llm_candidates = profiler.detect_llm_candidates(df_for_health)
-                
-                profile_a = llm_candidates.get("profile_a_messy_categories", {})
-                profile_b = llm_candidates.get("profile_b_messy_numbers", {})
-                
-                if not profile_a and not profile_b:
-                    st.info("✅ No messy columns detected. Your data looks clean!")
-                else:
-                    # Initialize storage for approved mappings
-                    if "approved_mappings" not in st.session_state:
-                        st.session_state.approved_mappings = {}
-                    
-                    # Profile A: Messy Categories
-                    if profile_a:
-                        st.write("**Profile A — Messy Categories (3-50 unique values)**")
-                        for col_name, info in profile_a.items():
-                            with st.expander(f"📋 {col_name} ({info['n_unique']} values)", expanded=False):
-                                if st.button(f"Generate AI mapping for {col_name}", key=f"ai_btn_a_{col_name}"):
-                                    with st.spinner(f"🔄 Generating mapping for {col_name}..."):
-                                        ai_mapping = llm.map_messy_categories(
-                                            unique_values=info['unique_values'],
-                                            column_name=col_name
-                                        )
-                                        
-                                        if llm.available:
-                                            st.success(f"✅ AI generated {len(ai_mapping)} mappings")
-                                            
-                                            # Review UI
-                                            from autoprep.streamlit_prompter import StreamlitHumanPrompter
-                                            prompter = StreamlitHumanPrompter()
-                                            approved = prompter.review_ai_mapping_categories(
-                                                col_name, ai_mapping, info['unique_values']
-                                            )
-                                            st.session_state.approved_mappings[col_name] = approved
-                                            st.success(f"✅ Saved {len(approved)} approved mappings for {col_name}")
-                                        else:
-                                            prompter = StreamlitHumanPrompter()
-                                            prompter.prompt_ai_fallback_warning()
-                                            st.info(f"Basic cleaning applied: {ai_mapping}")
-                    
-                    # Profile B: Messy Numbers
-                    if profile_b:
-                        st.write("**Profile B — Messy Numbers (80%+ contain digits)**")
-                        for col_name, info in profile_b.items():
-                            with st.expander(f"🔢 {col_name} ({info['digit_ratio']:.1%} numeric)", expanded=False):
-                                if st.button(f"Generate AI mapping for {col_name}", key=f"ai_btn_b_{col_name}"):
-                                    with st.spinner(f"🔄 Generating numeric mapping for {col_name}..."):
-                                        ai_mapping = llm.map_messy_numbers(
-                                            unique_values=info['unique_values'],
-                                            column_name=col_name
-                                        )
-                                        
-                                        if llm.available:
-                                            st.success(f"✅ AI generated {len(ai_mapping)} mappings")
-                                            
-                                            # Review UI
-                                            from autoprep.streamlit_prompter import StreamlitHumanPrompter
-                                            prompter = StreamlitHumanPrompter()
-                                            approved = prompter.review_ai_mapping_numbers(
-                                                col_name, ai_mapping, info['unique_values']
-                                            )
-                                            st.session_state.approved_mappings[col_name] = approved
-                                            st.success(f"✅ Saved {len(approved)} approved mappings for {col_name}")
-                                        else:
-                                            prompter = StreamlitHumanPrompter()
-                                            prompter.prompt_ai_fallback_warning()
-                                            st.info(f"Basic numeric extraction applied: {ai_mapping}")
             
-            if not interactive_mode:
-                st.success("Assessment complete. Ready to run the pipeline.")
+            # ── AUTO-GENERATED MAPPINGS REVIEW ────────────────────────────
+            if st.session_state.auto_mappings:
+                st.divider()
+                st.subheader("🤖 Review Auto-Generated Mappings")
+                st.markdown("AI has auto-generated mappings for messy columns. Review and edit below, then apply.")
+                
+                # Build review table for all mappings
+                review_data = []
+                for col_name, col_data in st.session_state.auto_mappings.items():
+                    mapping = col_data["mapping"]
+                    for original, proposed in mapping.items():
+                        review_data.append({
+                            "Column": col_name,
+                            "Original Value": original,
+                            "AI Proposed": str(proposed),
+                            "Approve": True
+                        })
+                
+                if review_data:
+                    st.write(f"**Total mappings to review: {len(review_data)} across {len(st.session_state.auto_mappings)} columns**")
+                    
+                    # Edit mappings
+                    edited_df = st.data_editor(
+                        pd.DataFrame(review_data),
+                        use_container_width=True,
+                        height=400,
+                        column_config={
+                            "AI Proposed": st.column_config.TextColumn(width=200),
+                            "Approve": st.column_config.CheckboxColumn(width=100)
+                        }
+                    )
+                    
+                    if st.button("Apply Approved Mappings", type="primary", use_container_width=True):
+                        # Only apply rows where Approve=True
+                        approved = edited_df[edited_df["Approve"] == True]
+                        
+                        for _, row in approved.iterrows():
+                            col = row["Column"]
+                            orig = row["Original Value"]
+                            new = row["AI Proposed"]
+                            
+                            if col not in st.session_state.approved_mappings:
+                                st.session_state.approved_mappings[col] = {}
+                            st.session_state.approved_mappings[col][orig] = new
+                        st.success(f"✅ Applied {len(approved)} mappings!")
+                        st.session_state.ready_for_pipeline = True
+                else:
+                    st.info("No mappings generated - data appears clean!")
+                st.success("✅ Ready to run pipeline")
     
     except Exception as e:
         st.error(f"Error: {str(e)}")
 
 st.divider()
 
-# Interactive decision interface
-if interactive_mode and st.session_state.health_report_data is not None:
-    from autoprep.streamlit_prompter import collect_user_decisions_streamlit
-    
-    st.subheader("Your Preprocessing Choices")
-    st.markdown("Select how to handle columns that need attention below.")
-    
-    user_decisions = collect_user_decisions_streamlit(
-        st.session_state.health_report_data,
-        ambiguous_columns=st.session_state.ambiguous_columns
-    )
-    st.session_state.user_decisions = user_decisions
-    
-    st.divider()
-
 # Run pipeline button
-run_disabled = file_path_to_use is None or (interactive_mode and st.session_state.health_report_data is None)
-run_btn = st.button("Run Pipeline", type="primary", disabled=run_disabled, use_container_width=True)
+run_disabled = file_path_to_use is None
+run_btn = st.button("▶️ Run Pipeline", type="primary", disabled=run_disabled, use_container_width=True)
 
 if run_disabled and not run_btn:
-    if file_path_to_use is None:
-        st.info("Please select or upload a dataset to begin.")
-    elif interactive_mode:
-        st.info("Click 'Analyze Data' above to assess your dataset first.")
+    st.info("📁 Upload a CSV file to get started")
 
 if run_btn:
-    from autoprep.pipeline import AutoPrepPipeline
-    from autoprep.streamlit_prompter import StreamlitHumanPrompter
-    from autoprep.llm_agent import LLMAssistant
-    from autoprep.loader import DataLoader
-    
     figures_dir = str(Path(__file__).parent / "reports" / "figures")
     
     # Create prompter with decisions if interactive mode
-    prompter = None
-    if interactive_mode and st.session_state.user_decisions is not None:
-        prompter = StreamlitHumanPrompter(streamlit_decisions=st.session_state.user_decisions)
-
     pipeline = AutoPrepPipeline(
         missing_strategy=missing_strategy,
-        missing_threshold=missing_threshold / 100.0,
-        outlier_method=outlier_method,
         outlier_action=outlier_action,
-        encoding_strategy=encoding_strategy,
-        onehot_max_cardinality=onehot_max_cardinality,
         extract_date_features=extract_date_features,
-        drop_identifiers=drop_identifiers,
         drop_low_variance=drop_low_variance,
-        drop_high_correlation=drop_high_correlation,
-        visualize=visualize,
-        output_dir=figures_dir,
-        interactive_mode=interactive_mode,
-        human_prompter=prompter,
     )
 
     with st.spinner("Processing your data..."):
         try:
-            # First apply any AI-approved mappings
-            if st.session_state.approved_mappings:
-                st.info("🤖 Applying AI-approved mappings...")
+            # Use the already-mapped data from analysis (auto-applied)
+            if st.session_state.df_for_analysis is not None:
+                st.info("✅ Using auto-applied mappings from analysis...")
+                df_to_run = st.session_state.df_for_analysis.copy()
+            else:
+                # Fallback: load raw data if no analysis yet
+                st.warning("⚠️ No mappings applied. Running on raw data.")
                 loader = DataLoader()
-                df_to_map = loader.load_data(file_path_to_use)
-                llm = LLMAssistant()
-                
-                for col_name, mapping_dict in st.session_state.approved_mappings.items():
-                    if col_name in df_to_map.columns and mapping_dict:
-                        df_to_map = llm.apply_mapping_to_dataframe(df_to_map, col_name, mapping_dict)
-                        st.success(f"✅ Applied {len(mapping_dict)} mappings to {col_name}")
-                
-                # Save mapped DataFrame temporarily
-                temp_mapped_path = Path(tempfile.gettempdir()) / f"mapped_{Path(file_path_to_use).name}"
-                df_to_map.to_csv(temp_mapped_path, index=False)
-                file_path_to_use = str(temp_mapped_path)
+                df_to_run = loader.load_data(file_path_to_use)
             
-            df_processed, report = pipeline.run(file_path_to_use)
-            rows_in = report['raw_profile']['shape']['rows']
-            rows_out = report['processed_profile']['shape']['rows']
-            cols = report['processed_profile']['shape']['cols']
-            st.success(f"Pipeline complete: {rows_in:,} rows → {rows_out:,} rows, {cols} final columns")
+            # Save to temporary file for pipeline
+            temp_path = Path(tempfile.gettempdir()) / f"mapped_{Path(file_path_to_use).name}"
+            df_to_run.to_csv(temp_path, index=False)
+            
+            df_processed, report = pipeline.run(str(temp_path))
+            st.success(f"✅ Pipeline complete: {report['raw_profile']['shape']['rows']:,} rows processed")
         except Exception as exc:
-            st.error(f"Pipeline error: {str(exc)}")
+            st.error(f"Error: {str(exc)}")
             st.stop()
 
     st.divider()
     
     # Results tabs
-    if interactive_mode and report.get("action_plan"):
-        tabs = st.tabs(["Results", "Raw Data", "Cleaned Data", "Assessment", "Report", "Visualizations"])
-        tab_data, tab_raw_profile, tab_cleaned_profile, tab_health, tab_report, tab_figs = tabs
-    else:
-        tabs = st.tabs(["Results", "Raw Data", "Cleaned Data", "Report", "Visualizations"])
-        tab_data, tab_raw_profile, tab_cleaned_profile, tab_report, tab_figs = tabs
-        tab_health = None
+    tabs = st.tabs(["Processed Data", "Raw Profile", "Cleaned Profile", "Visualizations"])
+    tab_data, tab_raw_profile, tab_cleaned_profile, tab_figs = tabs
 
-    # Results tab
+    # Processed data
     with tab_data:
-        st.subheader("Processed Data")
-        st.write(f"{df_processed.shape[0]:,} rows × {df_processed.shape[1]} columns")
+        st.subheader("Output Data")
+        st.write(f"**{df_processed.shape[0]:,} rows** × **{df_processed.shape[1]} columns**")
+        
+        # Explain transformations
+        with st.expander("📖 Data Transformations Applied", expanded=False):
+            st.markdown("""
+            **Encoding:** Categorical columns (low-cardinality) are one-hot encoded to 0/1 for ML models
+            - Example: Channel → Channel_AbbTakk=1, Channel_DawnNews=0, etc.
+            
+            **Normalization (StandardScaler):** Continuous numeric columns are standardized around 0
+            - Formula: (value - mean) / std_dev
+            - Result: Negative values are normal and expected
+            - Example: Revenue -0.127 means "0.127 std devs below average revenue"
+            - This enables proper correlation and ML model training
+            
+            **Text Columns:** High-cardinality text (names, headlines, etc.) stays readable
+            
+            **Date Features:** Extracted to year, month, day, dayofweek, quarter, is_weekend
+            """)
+        
         st.dataframe(df_processed, use_container_width=True)
 
         csv_bytes = df_processed.to_csv(index=False).encode()
         st.download_button(
-            "Download Results (CSV)",
+            "⬇️ Download (CSV)",
             data=csv_bytes,
             file_name="processed_data.csv",
             mime="text/csv",
         )
 
-    # Raw data profile
+    # Raw profile
     with tab_raw_profile:
-        st.subheader("Input Data Profile")
+        st.subheader("Input Profile")
         render_profile(report["raw_profile"])
 
-    # Cleaned data profile
+    # Cleaned profile
     with tab_cleaned_profile:
         st.subheader("After Cleaning")
         st.caption("Following deduplication, type correction, imputation, and outlier handling")
         render_profile(report["cleaned_profile"])
-
-    # Assessment tab (if interactive)
-    if tab_health is not None:
-        with tab_health:
-            st.subheader("Assessment & Actions")
-            render_health_report(report.get("health_report", {}))
-            st.divider()
-            render_action_plan(report.get("action_plan", {}))
-
-    # Report tab
-    with tab_report:
-        st.subheader("Detailed Report")
-
-        proc_numerical = report["processed_profile"].get("numerical", {})
-        with st.expander("Summary Statistics", expanded=True):
-            if proc_numerical:
-                stats_df = pd.DataFrame(proc_numerical).T
-                display_cols = [c for c in ["min", "mean", "50%", "max", "std", "skewness", "kurtosis"] if c in stats_df.columns]
-                stats_df = stats_df[display_cols].rename(columns={"50%": "median"})
-                st.dataframe(stats_df.round(3), use_container_width=True)
-            else:
-                st.info("No numerical columns in results.")
-
-        render_report_section("Cleaning Changes", report["cleaning"])
-        render_report_section("Encoding Applied", report["encoding"])
-        render_report_section("Features Engineered", report["feature_engineering"])
-
-        st.download_button(
-            "Download Full Report (JSON)",
-            data=json.dumps(report, indent=2),
-            file_name="pipeline_report.json",
-            mime="application/json",
-        )
 
     # Visualizations tab
     with tab_figs:
