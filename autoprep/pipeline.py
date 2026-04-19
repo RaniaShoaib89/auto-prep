@@ -324,8 +324,10 @@ class AutoPrepPipeline:
     def _normalize_numeric_columns(self, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         """
         Normalize (standardize) ONLY continuous numeric columns for ML correlation analysis.
-        Skip binary (0/1) encoded columns - they should stay as 0/1.
-        Text columns stay readable (not normalized).
+        Skip:
+        - Date features (year, month, day, etc.) - keep as integers
+        - Binary (0/1) encoded columns - they should stay as 0/1
+        - Text columns stay readable (not normalized)
         
         Returns:
             (df_normalized, report_dict)
@@ -333,11 +335,20 @@ class AutoPrepPipeline:
         df = df.copy()
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         
-        # Filter out binary columns (0/1 one-hot encoded) - don't normalize these
+        # Date feature patterns to skip
+        date_patterns = ["_year", "_month", "_day", "_hour", "_dayofweek", "_quarter", "_is_weekend"]
+        
+        # Filter out binary columns (0/1 one-hot encoded) and date features - don't normalize these
         continuous_cols = []
         binary_cols = []
+        date_cols = []
         
         for col in numeric_cols:
+            # Check if column is a date feature
+            if any(pattern in col for pattern in date_patterns):
+                date_cols.append(col)
+                continue
+            
             unique_vals = df[col].unique()
             # Check if column is binary (only 0, 1, NaN)
             non_null_vals = unique_vals[~pd.isna(unique_vals)]
@@ -349,10 +360,11 @@ class AutoPrepPipeline:
         report = {
             "columns_normalized": continuous_cols,
             "binary_columns_kept_as_is": binary_cols,
+            "date_columns_kept_as_integers": date_cols,
             "scaler": "StandardScaler"
         }
         
-        # Only normalize continuous numeric columns
+        # Only normalize continuous numeric columns (not dates, not binary)
         if continuous_cols:
             scaler = StandardScaler()
             df[continuous_cols] = scaler.fit_transform(df[continuous_cols])

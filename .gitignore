@@ -5,3 +5,7 @@ __pycache__/
 *.egg-info/
 reports/
 git d
+test_conversion.py
+test_lakh_crore.csv
+LAKH_CRORE_FIX_SUMMARY.md
+app_backup.py

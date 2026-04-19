@@ -69,104 +69,262 @@ class LLMAssistant:
         self, unique_values: list, column_name: str, context: str = ""
     ) -> Dict[str, str]:
         """
-        Use LLM to intelligently map messy category values to standardized forms.
-
+        [DEPRECATED - use standardize_column_values instead]
+        Maps messy category values to standardized forms.
+        Now delegates to the generic standardize_column_values method.
+        """
+        return self.standardize_column_values(unique_values, column_name, context)
+    
+    def map_messy_numbers(
+        self, unique_values: list, column_name: str, context: str = ""
+    ) -> Dict[str, Any]:
+        """
+        [DEPRECATED - use standardize_column_values instead]
+        Maps messy numeric values to standardized numbers.
+        Now delegates to the generic standardize_column_values method.
+        """
+        return self.standardize_column_values(unique_values, column_name, context)
+    
+    def standardize_column_values(
+        self, unique_values: list, column_name: str, context: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Generic intelligent standardization that detects inconsistency type automatically.
+        Handles: numeric/currency, categorical, formatted numbers, mixed formats, etc.
+        
         Args:
             unique_values: List of unique values from the column
-            column_name: Name of the column (for context)
-            context: Optional domain context (e.g., "country codes", "product categories")
-
+            column_name: Name of the column
+            context: Optional domain context
+            
         Returns:
             Dictionary mapping original values to standardized values.
-            If API fails, returns basic cleaned version (lowercase, stripped).
+            Automatically detects what kind of standardization is needed.
         """
         if not self.available:
-            logger.warning(f"⚠️ Groq unavailable for {column_name}. Using basic text cleaning fallback.")
-            print(f"⚠️ Groq unavailable for {column_name}. Using fallback...")
-            return self._fallback_text_clean(unique_values)
+            return self._fallback_smart_standardize(unique_values)
+        
+        # Analyze the column to detect inconsistency patterns
+        analysis = self._analyze_column_patterns(unique_values)
+        
+        prompt = f"""You are an expert data standardization specialist. Analyze the column values and standardize them intelligently.
 
-        prompt = f"""You are a data consolidation expert. Analyze unique values and map semantically identical variations to ONE canonical form.
+Column Name: {column_name}
+{f'Domain Context: {context}' if context else ''}
+Column Sample Size: {len(unique_values)} unique values
 
-Column: {column_name}
-{f'Context: {context}' if context else ''}
-
-Values to consolidate:
+VALUES TO STANDARDIZE:
 {json.dumps(unique_values, indent=2)}
 
-CONSOLIDATION PRINCIPLES:
+DETECTED PATTERNS:
+{json.dumps(analysis, indent=2)}
 
-1. IDENTIFY SEMANTIC IDENTITY:
-   - Do two values represent the SAME ENTITY/CONCEPT/MEANING?
-   - If YES → map to one canonical form
-   - If NO → keep separate
+YOUR TASK:
+Standardize these values by:
 
-2. CONSOLIDATE ONLY THESE PATTERNS:
-   a) Case/Format Variations: "Value", "value", "VALUE" → "value"
-   b) Whitespace Variations: "  value  ", "value" → "value"
-   c) Punctuation: "value.", "value-", "value" → "value"
-   d) Abbreviations of Same Concept: "USA", "US", "U.S.A" → "usa"
-   e) Synonyms within SAME DOMAIN: "automobile" + "car" + "vehicle" → only if CLEARLY same thing
+1. DETECT INCONSISTENCY TYPE:
+   - Are these formatting variations of the SAME concept? (e.g., "USA", "us", "U.S.A" → all USA)
+   - Are these numeric values with different units/multipliers? (e.g., "5 lakh", "500000", "5.0L" → all 500000)
+   - Are these semantic duplicates with spelling/case variations?
+   - Are these values with currency symbols, percentages, or other decorators?
+   - Are these structured data with different delimiters or formats?
 
-3. DO NOT CONSOLIDATE THESE PATTERNS:
-   a) Semantically Different Entities: "Apple" (fruit) vs "Apple" (company) should stay separate if ambiguous
-   b) Opposite/Contradictory Meanings: "yes"/"no", "active"/"inactive", "true"/"false"
-   c) Distinct Categories: "Category_A" + "Category_B" (different things in same domain)
-   d) Abbreviations with Unclear Meaning: If you cannot confidently say "X" = "Y", keep separate
-   e) Names/Identifiers: "John" ≠ "Jane" (different entities, even if similar format)
+2. STANDARDIZATION RULES (apply MOST APPROPRIATE):
+   
+   a) IF SEMANTIC DUPLICATES (same concept, different format):
+      - "USA", "us", "U.S.A" → consolidate to "usa" (pick canonical form)
+      - "New York", "new york", "NY" → consider if they're same (consolidate if yes)
+   
+   b) IF NUMERIC WITH MULTIPLIERS/UNITS:
+      - Extract the numeric base value
+      - Apply multipliers: k=1000, m=1000000, b=1000000000
+      - IMPORTANT: lakh=100000, crore=10000000 (Indian numbering)
+      - Remove currency symbols ($, £, €, ₹, etc.)
+      - Handle decimals (1.5, 2.3, etc.)
+      - Examples: "5 lakh" → 500000, "2.5 crore" → 25000000, "$100" → 100
+   
+   c) IF STRUCTURED DATA (dates, times, addresses, phone numbers):
+      - "2026-04-20", "04/20/2026", "20-04-2026" → standardize to ISO format: "2026-04-20"
+      - "+1 234-567-8900", "1(234)567-8900" → "12345678900"
+      - "123 Main St", "123 main street" → "123 main street"
+   
+   d) IF MIXED TYPES (some numeric, some text):
+      - Try to convert all to most appropriate type (usually numeric if >80% are numeric)
+      - Keep as text if mixed semantic meaning
+   
+   e) IF TRULY DIFFERENT ENTITIES:
+      - "apple" (fruit) vs "apple" (company) - if genuinely different, keep separate
+      - "red" vs "blue" - genuinely different colors, keep separate
+      - Only consolidate when you're 100% confident they mean the EXACT same thing
 
-4. CONSOLIDATION SAFETY:
-   - When uncertain → KEEP SEPARATE (do not guess)
-   - Over-consolidation corrupts data analysis
-   - Under-consolidation is better than over-consolidation
-   - If you cannot defend a mapping with 100% confidence → don't do it
+3. CONSOLIDATION SAFETY:
+   - Conservative: when uncertain → KEEP SEPARATE (don't over-consolidate)
+   - Preserve distinctness: "active" ≠ "inactive", "yes" ≠ "no"
+   - Many-to-one mapping only for TRUE DUPLICATES or DIRECT SYNONYMS
 
-5. CARDINALITY RULE:
-   - Many-to-one mappings only when values are TRUE DUPLICATES or DIRECT SYNONYMS
-   - Do not reduce cardinality just to minimize unique count
-   - Preserve distinct meanings
+4. OUTPUT FORMAT:
+   Return ONLY valid JSON with no markdown.
+   Format: {{"original_value": standardized_value, ...}}
+   
+   Examples:
+   - Categorical: {{"USA": "usa", "us": "usa", "U.S.A": "usa"}}
+   - Numeric: {{"5 lakh": 500000, "50 lac": 5000000, "5.5 crore": 55000000}}
+   - Dates: {{"04/20/2026": "2026-04-20", "2026-04-20": "2026-04-20"}}
+   - Mixed: {{"Product A": "product_a", "product a": "product_a", "prod_a": "product_a"}}
 
-DECISION FRAMEWORK:
-For each pair of values, ask: "Are these referring to the EXACT SAME THING with different formatting/spelling?"
-- If YES → consolidate
-- If NO or MAYBE → keep separate
-
-OUTPUT: Return ONLY valid JSON (no markdown, no explanation).
-Format: {{"original_value": "standardized_value", ...}}
-Each value maps to either itself or a canonical form.
+IMPORTANT:
+- Return ONLY the JSON mapping, no explanations or markdown
+- Each original value must have exactly one standardized output
+- If you cannot standardize a value with confidence → return it unchanged
+- Null/None values → map to null
 """
 
         try:
-            print(f"📡 Calling Groq API for category mapping: {column_name}")
+            print(f"\n📡 Calling Groq API for intelligent standardization: {column_name}")
+            print(f"   Unique values to process: {unique_values[:10]}")
+            
             message = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],
             )
             response_text = message.choices[0].message.content.strip()
             print(f"✅ Groq API response received for {column_name}")
-
-            # Extract JSON from response (handle markdown code blocks)
+            print(f"   Raw response (first 500 chars): {response_text[:500]}")
+            
             mapping = self._extract_json(response_text)
-            logger.info(f"✓ LLM generated mapping for {column_name}: {len(mapping)} entries")
-            print(f"✓ Mapping created: {len(mapping)} value pairs")
-            print(f"  Raw response preview: {response_text[:300]}")
-            print(f"  Parsed mapping: {mapping}")
+            logger.info(f"✓ LLM generated standardization for {column_name}: {len(mapping)} entries")
+            print(f"✓ Initial mapping from LLM: {mapping}")
             
-            # Validate consolidation aggressiveness
+            # Post-process: Convert string numbers to actual numbers
+            mapping_before_coerce = mapping.copy()
+            mapping = self._coerce_numeric_values(mapping)
+            
+            if mapping != mapping_before_coerce:
+                print(f"   After numeric coercion:")
+                for k, v_before in mapping_before_coerce.items():
+                    v_after = mapping.get(k)
+                    if v_after != v_before:
+                        print(f"     '{k}': {repr(v_before)} ({type(v_before).__name__}) → {repr(v_after)} ({type(v_after).__name__})")
+            
+            print(f"   Final mapping before validation: {mapping}")
+            
+            # Validate consolidation
             mapping = self._validate_consolidation(mapping, unique_values, column_name)
-            
+            print(f"   Final mapping after validation: {mapping}")
             return mapping
-
+            
         except Exception as e:
             logger.error(f"LLM API error for {column_name}: {e}")
             print(f"🔴 API CALL FAILED for {column_name}: {e}")
-            print(f"   Error type: {type(e).__name__}")
-            print(f"   Full error: {str(e)}")
-            return self._fallback_text_clean(unique_values)
-
-    def map_messy_numbers(
-        self, unique_values: list, column_name: str, context: str = ""
-    ) -> Dict[str, Any]:
+            return self._fallback_smart_standardize(unique_values)
+    
+    def _analyze_column_patterns(self, unique_values: list) -> Dict[str, Any]:
+        """Analyze patterns in column values to guide LLM."""
+        import re
+        
+        analysis = {
+            "total_unique_values": len(unique_values),
+            "detected_patterns": [],
+            "sample_values": unique_values[:5],
+        }
+        
+        # Check for numeric/currency patterns
+        numeric_count = 0
+        currency_symbols = set()
+        multipliers = set()
+        
+        for val in unique_values:
+            val_str = str(val).lower()
+            
+            # Numeric detection
+            if re.search(r'\d+\.?\d*', val_str):
+                numeric_count += 1
+                
+                # Currency symbols
+                if any(sym in val_str for sym in ['$', '€', '£', '₹', '¥']):
+                    currency_symbols.add([s for s in ['$', '€', '£', '₹', '¥'] if s in val_str][0])
+                
+                # Multiplier words
+                multiplier_words = ['lakh', 'lac', 'crore', 'cr', 'thousand', 'k', 'million', 'm', 'billion', 'b', 'h', 'hundred']
+                for word in multiplier_words:
+                    if word in val_str:
+                        multipliers.add(word)
+        
+        if numeric_count > 0:
+            analysis["detected_patterns"].append(f"numeric_values ({numeric_count}/{len(unique_values)})")
+        
+        if currency_symbols:
+            analysis["detected_patterns"].append(f"currency_symbols: {list(currency_symbols)}")
+        
+        if multipliers:
+            analysis["detected_patterns"].append(f"multipliers: {list(multipliers)}")
+        
+        # Check for date patterns
+        date_pattern = r'\d{1,4}[-/]\d{1,2}[-/]\d{1,4}|\d{1,2}-\w+-\d{4}'
+        if any(re.search(date_pattern, str(val)) for val in unique_values):
+            analysis["detected_patterns"].append("date_values")
+        
+        # Check for case variation
+        has_mixed_case = len([v for v in unique_values if str(v).lower() != str(v).upper()]) > 0
+        if has_mixed_case:
+            analysis["detected_patterns"].append("case_variations")
+        
+        # Check for whitespace variation
+        has_whitespace_var = any(' ' in str(v) for v in unique_values)
+        if has_whitespace_var:
+            analysis["detected_patterns"].append("whitespace_variations")
+        
+        return analysis
+    
+    def _fallback_smart_standardize(self, unique_values: list) -> Dict[str, Any]:
+        """Smart fallback that handles common standardizations without LLM."""
+        import re
+        
+        mapping = {}
+        
+        for val in unique_values:
+            if pd.isna(val):
+                mapping[str(val)] = None
+                continue
+            
+            val_str = str(val).strip()
+            standardized = val_str
+            
+            # Try numeric extraction with multipliers (IMPORTANT: lakh/crore must come first)
+            numeric_match = re.search(r'([\d.]+)\s*([a-z]*)', val_str.lower())
+            if numeric_match:
+                try:
+                    num = float(numeric_match.group(1))
+                    multiplier = numeric_match.group(2).strip()
+                    
+                    multipliers = {
+                        'thousand': 1000, 'k': 1000,
+                        'million': 1000000, 'm': 1000000,
+                        'billion': 1000000000, 'b': 1000000000,
+                        'lakh': 100000, 'lac': 100000, 'l': 100000,
+                        'crore': 10000000, 'cr': 10000000,
+                        'hundred': 100, 'h': 100
+                    }
+                    
+                    if multiplier in multipliers:
+                        standardized = num * multipliers[multiplier]
+                        print(f"  ✅ {val_str} → {standardized} (multiplier: {multiplier})")
+                    elif multiplier == '':
+                        standardized = num
+                    else:
+                        # Keep as text if multiplier unknown
+                        standardized = val_str.lower().strip()
+                except Exception as e:
+                    print(f"  ⚠️  Could not parse numeric value in {val_str}: {e}")
+                    standardized = val_str.lower().strip()
+            else:
+                # No numeric match - text standardization: lowercase, trim whitespace
+                standardized = val_str.lower().strip()
+            
+            mapping[val_str] = standardized
+        
+        return mapping
         """
         Use LLM to map messy number-like strings to standardized numeric values.
         Examples: "$100" → 100, "5 mil" → 5000000, "1.5k" → 1500
@@ -198,14 +356,17 @@ STANDARDIZATION RULES:
    a) Currency Symbols: Remove $ £ € ¥ etc., keep numeric value
    b) Punctuation: Remove commas (1,000 → 1000), keep decimals (1.5)
    c) Whitespace: Strip leading/trailing spaces
-   d) Hidden multipliers: Identify words meaning "thousands", "millions", etc.
+   d) Hidden multipliers: Identify words meaning "thousands", "millions", "lakhs", "crores", etc.
 
 2. WORD MULTIPLIERS (apply these):
    - "thousand", "k", "K", "k." = × 1,000
    - "million", "m", "M", "m." = × 1,000,000
    - "billion", "b", "B", "b." = × 1,000,000,000
    - "hundred", "hundred" = × 100
-   - For domain-specific multipliers (region-specific): Use context or keep raw if unsure
+   - "lakh", "lac", "l", "L" = × 100,000  [IMPORTANT for Indian numbers]
+   - "crore", "cr", "Cr" = × 10,000,000  [IMPORTANT for Indian numbers]
+   - "lakh crore", "lakh-crore" = × 10,000,000,000
+   - For domain-specific multipliers: Use context or keep raw if unsure
 
 3. DECIMAL HANDLING:
    - Preserve decimal precision: 1.5 stays 1.5
@@ -266,6 +427,32 @@ Example: {{"$100": 100, "5M": 5000000, "N/A": null}}
                 print(f"    👉 REVIEW THIS in data editor - may be over-consolidation!")
         
         return mapping
+    
+    def _coerce_numeric_values(self, mapping: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert string representations of numbers to actual numeric values."""
+        coerced = {}
+        
+        for original, standardized in mapping.items():
+            if standardized is None:
+                coerced[original] = None
+            elif isinstance(standardized, (int, float)):
+                # Already numeric
+                coerced[original] = standardized
+            elif isinstance(standardized, str):
+                # Try to convert to numeric
+                try:
+                    # Try integer first
+                    if '.' not in standardized:
+                        coerced[original] = int(standardized)
+                    else:
+                        coerced[original] = float(standardized)
+                except (ValueError, TypeError):
+                    # Keep as string if not numeric
+                    coerced[original] = standardized
+            else:
+                coerced[original] = standardized
+        
+        return coerced
 
     def _extract_json(self, text: str) -> dict:
         """Extract JSON from response, handling markdown code blocks and formatting."""

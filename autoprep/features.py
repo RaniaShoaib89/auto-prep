@@ -54,15 +54,16 @@ class FeatureEngineer:
 
         for col in dt_cols:
             p = col  # prefix
-            df[f"{p}_year"] = df[col].dt.year
-            df[f"{p}_month"] = df[col].dt.month
-            df[f"{p}_day"] = df[col].dt.day
-            df[f"{p}_dayofweek"] = df[col].dt.dayofweek   # Mon=0, Sun=6
-            df[f"{p}_quarter"] = df[col].dt.quarter
-            df[f"{p}_is_weekend"] = df[col].dt.dayofweek.isin([5, 6]).astype(int)
+            # Extract date features as INT64 (not float decimals)
+            df[f"{p}_year"] = df[col].dt.year.astype('Int64')
+            df[f"{p}_month"] = df[col].dt.month.astype('Int64')
+            df[f"{p}_day"] = df[col].dt.day.astype('Int64')
+            df[f"{p}_dayofweek"] = df[col].dt.dayofweek.astype('Int64')   # Mon=0, Sun=6
+            df[f"{p}_quarter"] = df[col].dt.quarter.astype('Int64')
+            df[f"{p}_is_weekend"] = df[col].dt.dayofweek.isin([5, 6]).astype('Int64')
             # Only add hour if it carries information
             if df[col].dt.hour.nunique() > 1:
-                df[f"{p}_hour"] = df[col].dt.hour
+                df[f"{p}_hour"] = df[col].dt.hour.astype('Int64')
                 new_features.append(f"{p}_hour")
             new_features += [
                 f"{p}_year", f"{p}_month", f"{p}_day",
